@@ -166,6 +166,64 @@ def _derive_slope_aspect(
     return slope_deg, aspect_deg
 
 
+def resample_terrain_features(
+    dem_path: Path,
+    reference_path: Path,
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Derive 30 m terrain features then bilinearly align them to a reference grid.
+
+    Aspect is converted to sine/cosine on its native 30 m grid before either
+    component is bilinearly resampled. This avoids interpolating through the
+    0/360 degree discontinuity. Elevation and slope are bilinear as well.
+    """
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.warp import reproject
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(dem_path) as dem, rasterio.open(reference_path) as ref:
+        if dem.crs is None or ref.crs is None:
+            raise ValueError("DEM and reference raster must both declare a CRS")
+        if dem.crs != ref.crs:
+            raise ValueError(f"DEM CRS {dem.crs} does not match reference CRS {ref.crs}")
+        if abs(dem.transform.a) != DEM_RESOLUTION_M or abs(dem.transform.e) != DEM_RESOLUTION_M:
+            raise ValueError(f"Expected a {DEM_RESOLUTION_M} m native DEM grid")
+        elevation = dem.read(1).astype("float32")
+        if dem.nodata is not None:
+            elevation[elevation == dem.nodata] = np.nan
+        slope, aspect = _derive_slope_aspect(elevation, DEM_RESOLUTION_M)
+        aspect_rad = np.deg2rad(aspect)
+        native = {
+            "elevation_10m": elevation,
+            "slope_10m": slope,
+            "aspect_sin_10m": np.sin(aspect_rad).astype("float32"),
+            "aspect_cos_10m": np.cos(aspect_rad).astype("float32"),
+        }
+        outputs: dict[str, Path] = {}
+        for name, source in native.items():
+            destination = np.full((ref.height, ref.width), np.nan, dtype="float32")
+            reproject(
+                source=source,
+                destination=destination,
+                src_transform=dem.transform,
+                src_crs=dem.crs,
+                src_nodata=np.nan,
+                dst_transform=ref.transform,
+                dst_crs=ref.crs,
+                dst_nodata=np.nan,
+                resampling=Resampling.bilinear,
+            )
+            path = output_dir / f"{name}.tif"
+            profile = ref.profile.copy()
+            profile.update(driver="GTiff", count=1, dtype="float32", nodata=np.nan, compress="deflate")
+            with rasterio.open(path, "w", **profile) as out:
+                out.write(destination, 1)
+                out.set_band_description(1, name)
+            outputs[name] = path
+    return outputs
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------

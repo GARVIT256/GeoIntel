@@ -10,10 +10,10 @@ project:
 
 # --- Area of Interest ---
 aoi:
-  path: config/aoi_dehradun.geojson   # relative to repo root
+  path: config/aoi_dehradun_30km_approved.geojson   # approved 30 km square
   # Bounding box (EPSG:4326) – used as a fast pre-filter before polygon clip
-  bbox: [77.938213, 30.081756, 78.207694, 30.488496]  # current bbox; polygonized, replacement pending approval
-  name: "Dehradun_AOI"
+  bbox: [77.91268192734239, 30.14645226874561, 78.23225350363738, 30.423795679675607]
+  name: "Dehradun_AOI_approved_30km_square"
 
 # --- Epochs (dry-season composites, avoid Jun–Sep monsoon) ---
 epochs:
@@ -49,14 +49,18 @@ resolution:
   reference_m: 10          # native 10 m grid
   resample_method_continuous: "bilinear"
   resample_method_categorical: "nearest"
+  dem_native_m: 30
+  dem_terrain_to_reference: "bilinear"
+  dem_aspect_encoding: ["sin", "cos"] # encode on native 30 m grid before resampling
 
 # --- Land-cover class scheme ---
 classes:
   1: {name: "built-up",                  color: "#E31A1C"}
-  2: {name: "tree/dense-vegetation",     color: "#33A02C"}
-  3: {name: "cropland/grass/low-veg",    color: "#B2DF8A"}
-  4: {name: "bare/sparse",               color: "#FDBF6F"}
+  2: {name: "tree",                      color: "#33A02C"}
+  3: {name: "cropland/grass",            color: "#B2DF8A"}
+  4: {name: "bare",                      color: "#FDBF6F"}
   5: {name: "water",                     color: "#1F78B4"}
+  0: {name: "unclassified",              color: "#000000"}
 
 # --- Change detection ---
 change:
@@ -64,6 +68,7 @@ change:
   built_class: 1
   majority_filter_size: 3             # pixels (3x3 window)
   minimum_mapping_unit_ha: 0.5        # polygons smaller than this are removed
+  connectivity: 8                     # same-class component connectivity
   ndvi_diff_threshold: -0.15          # ΔNDVi threshold for baseline comparison
   grid_cell_size_m: 1000              # 1 km fishnet for association analysis
 
@@ -74,6 +79,7 @@ association:
   getis_ord: true
   alpha: 0.05
   top_n_hotspots: 20
+  permutations: 999
 
 # --- Classification ---
 classifier:

@@ -1,0 +1,28 @@
+{
+  "type": "FeatureCollection",
+  "name": "Dehradun_AOI_approved_proposal_snapshot",
+  "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [77.9211418422992, 30.14645226874561],
+          [78.23225350363738, 30.15338712994636],
+          [78.22464562073326, 30.423795679675607],
+          [77.91268192734239, 30.416785649481632],
+          [77.9211418422992, 30.14645226874561]
+        ]]
+      },
+      "properties": {
+        "name": "Dehradun_AOI_approved_30km_square_snapshot",
+        "approval_status": "APPROVED; active copy is aoi_dehradun_30km_approved.geojson",
+        "construction": "30 km by 30 km square in EPSG:32644; corners transformed to EPSG:4326",
+        "compute_crs": "EPSG:32644",
+        "north_edge_note": "Approved north edge is south of Mussoorie ridge.",
+        "projected_bounds_m": [203417, 3339018, 233417, 3369018]
+      }
+    }
+  ]
+}

@@ -160,11 +160,25 @@ class TestRuleBasedClassifier:
         )
 
         result = classify_rule_based(indices)
+        # BSI <= 0 and NDVI <= 0.25 remains unclassified (class 0).
         np.testing.assert_array_equal(result.values, [[3, 0]])
 
         indices.loc[dict(index_band="BSI", x=1)] = 0.2
         result = classify_rule_based(indices)
         np.testing.assert_array_equal(result.values, [[3, 4]])
+
+    def test_strict_priority_assigns_all_five_classes_and_unclassified(self) -> None:
+        values = np.array([
+            [[0.8, 0.6, 0.6, 0.4, 0.1, 0.1]],  # NDVI
+            [[0.9, 0.7, 0.1, -0.1, -0.1, -0.1]],  # NDBI
+            [[0.1, -0.1, -0.1, -0.1, -0.1, -0.1]],  # MNDWI
+            [[0.9, 0.9, -0.1, -0.1, 0.2, 0.0]],  # BSI
+        ], dtype=np.float32)
+        indices = xr.DataArray(
+            values, dims=["index_band", "y", "x"],
+            coords={"index_band": ["NDVI", "NDBI", "MNDWI", "BSI"]},
+        )
+        np.testing.assert_array_equal(classify_rule_based(indices).values, [[5, 1, 2, 3, 4, 0]])
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +200,15 @@ class TestRFClassifier:
 
         assert np.linalg.norm(features[0, 11:13] - features[1, 11:13]) < 0.04
 
+    def test_native_encoded_aspect_components_are_used(self, synthetic_composite: xr.DataArray) -> None:
+        sine = np.full((10, 10), 0.25, dtype=np.float32)
+        cosine = np.full((10, 10), 0.75, dtype=np.float32)
+        features, _ = extract_feature_stack(
+            synthetic_composite, aspect_sin=sine, aspect_cos=cosine
+        )
+        np.testing.assert_allclose(features[:, 11], 0.25)
+        np.testing.assert_allclose(features[:, 12], 0.75)
+
     def test_pseudo_training_data_generation(self, synthetic_composite: xr.DataArray) -> None:
         X_tr, y_tr = generate_pseudo_training_data(synthetic_composite, n_samples_per_class=10)
         assert X_tr.shape[1] == 13
@@ -204,6 +227,7 @@ class TestRFClassifier:
         assert "oob_score" in metrics
         assert "cv_accuracy_mean" in metrics
         assert metrics["validation_status"].startswith("bootstrap only")
+        assert "agreement with rule-derived pseudo-labels" in metrics["metric_interpretation"]
         assert metrics["cv_accuracy_mean"] >= 0.50
 
         rf_map = predict_rf_lulc(model, synthetic_composite)
@@ -242,6 +266,10 @@ class TestChangeDetection:
         result = compute_transition_matrix(t1, t2)
 
         assert result["total_valid_area_km2"] == pytest.approx(0.0002)
+        assert result["excluded_pixels"] == 2
+        assert result["excluded_area_km2"] == pytest.approx(0.0002)
+        assert result["excluded_area_pct"] == pytest.approx(50.0)
+        assert result["total_footprint_area_km2"] == pytest.approx(0.0004)
         assert sum(map(sum, result["matrix_pixels"])) == 2
 
     def test_spatial_change_masks(self) -> None:

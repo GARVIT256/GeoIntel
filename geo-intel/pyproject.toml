@@ -94,6 +94,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+    "raster: requires Rasterio/GDAL native raster operations and is skipped when Rasterio cannot import",
+]
 
 [tool.ruff]
 line-length = 100

@@ -59,12 +59,22 @@ def compute_transition_matrix(
     assert arr1.shape == arr2.shape, f"LULC map shape mismatch: {arr1.shape} vs {arr2.shape}"
 
     # Pixel area in square kilometres
-    pixel_area_km2 = (pixel_size_m ** 2) / 1_000_000.0  # 100 m² = 0.0001 km²
+    if pixel_size_m <= 0:
+        raise ValueError("pixel_size_m must be positive")
+    pixel_area_km2 = (pixel_size_m ** 2) / 1_000_000.0
+    footprint_pixels = int(arr1.size)
 
     valid_mask = (
         np.isfinite(arr1) & np.isfinite(arr2)
         & (arr1 >= 1) & (arr1 <= 5)
         & (arr2 >= 1) & (arr2 <= 5)
+    )
+    valid_pixels = int(valid_mask.sum())
+    excluded_pixels = footprint_pixels - valid_pixels
+    footprint_area_km2 = footprint_pixels * pixel_area_km2
+    excluded_area_km2 = excluded_pixels * pixel_area_km2
+    excluded_area_pct = (
+        excluded_pixels / footprint_pixels * 100.0 if footprint_pixels else 0.0
     )
 
     matrix_pixels = np.zeros((5, 5), dtype=np.int64)
@@ -117,6 +127,11 @@ def compute_transition_matrix(
         "class_stats": class_stats,
         "transitions_km2": transitions_km2,
         "total_valid_area_km2": round(float(valid_mask.sum() * pixel_area_km2), 4),
+        "joint_valid_pixels": valid_pixels,
+        "excluded_pixels": excluded_pixels,
+        "excluded_area_km2": round(excluded_area_km2, 4),
+        "excluded_area_pct": round(excluded_area_pct, 4),
+        "total_footprint_area_km2": round(footprint_area_km2, 4),
     }
 
 

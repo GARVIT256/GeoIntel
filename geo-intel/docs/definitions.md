@@ -6,9 +6,11 @@
 
 ## 1. Study Area
 
-**Name:** Dehradun 30 x 30 km AOI
-**Bounding box (EPSG:4326):** West 77.90, South 30.20, East 78.20, North 30.50
-**GeoJSON file:** `config/aoi_dehradun.geojson` (status: PROPOSED — awaiting user confirmation)
+**Name:** Dehradun approved 30 km square AOI
+**Approved GeoJSON:** `config/aoi_dehradun_30km_approved.geojson` (approved by user on 2026-10-03).
+**Projected extent (EPSG:32644):** 30 x 30 km, 900 km²; bounds [203.417, 3339.018, 233.417, 3369.018] km. The approved north edge is south of the Mussoorie ridge.
+**Previous footprint:** `config/aoi_dehradun.geojson` remains as historical geometry; its measured projected extent was 27.096 x 45.770 km and area 1,170.378 km². `config/aoi_dehradun_proposed.geojson` records the approved shape as an earlier proposal snapshot.
+**Data consequence:** Existing/previous Colab composites do not cover this approved AOI definition reliably; rerun the Colab smoke test and full T1/T2 composites using the updated config before any real-data reporting.
 **Compute CRS:** EPSG:32644 (UTM Zone 44N). All area, length, and distance
 computations are performed in this CRS. Results reported in m2 or hectares.
 **Display CRS:** EPSG:4326 (WGS 84) for coordinates; EPSG:3857 for web maps.
@@ -41,6 +43,7 @@ cloud cover in Dehradun routinely exceeds 80% during that period.
   0 (no data), 1 (saturated/defective), 2 (dark area), 3 (cloud shadow),
   8 (medium cloud), 9 (high cloud), 10 (thin cirrus), 11 (snow/ice)
 - **Compositing:** Pixel-wise median over all valid observations in each window
+- **Reflectance harmonization:** Use STAC raster scale/offset metadata when present. Otherwise, for acquisitions on/after 2022-01-25, subtract 1000 DN before dividing by 10000, except when Earth Search reports `earthsearch:boa_offset_applied=true`. SCL remains categorical and is not reflectance-scaled. Synthetic unit tests cover historical, post-offset, and already-corrected cases; real T1/T2 values remain unverified until the hosted run.
 - **Bands used:**
 
 | Band | Wavelength | Native res | Use in this project |
@@ -65,10 +68,13 @@ cloud cover in Dehradun routinely exceeds 80% during that period.
 | Code | Name | Description | Key spectral cues |
 |---|---|---|---|
 | 1 | built-up | Impervious surfaces: buildings, roads, concrete, paved areas | High NDBI, low NDVI, low MNDWI |
-| 2 | tree/dense-vegetation | Dense tree canopy, forest, orchards | High NDVI (> ~0.5), high NIR |
-| 3 | cropland/grass/low-veg | Agricultural fields, grass, sparse/low vegetation | Moderate NDVI (0.2–0.5) |
-| 4 | bare/sparse | Bare soil, gravel, sparse vegetation, construction sites | High BSI, low NDVI (< 0.2) |
+| 2 | tree | Dense tree canopy, forest, orchards | NDVI > 0.5 |
+| 3 | cropland/grass | Agricultural fields, grass, sparse/low vegetation | 0.25 < NDVI <= 0.5 |
+| 4 | bare | Bare soil, gravel, exposed ground, construction sites | BSI > 0 and NDVI <= 0.25 after higher-priority rules |
 | 5 | water | Rivers, lakes, ponds | Negative NDVI, high MNDWI |
+| 0 | unclassified | Valid land not assigned by a class rule, or no-data | No matching rule |
+
+Strict rule precedence is water > built-up > tree > cropland/grass > bare > unclassified. Bare requires BSI > 0 and NDVI <= 0.25. A valid pixel with BSI <= 0 and NDVI <= 0.25 is unclassified unless an earlier rule assigns it.
 
 > **Known confusion risks:** built-up (1) vs bare/sparse (4) in dry season;
 > tree (2) vs cropland (3) at field edges; hill shadows may be confused with
@@ -151,13 +157,19 @@ inside the computation (float32 throughout).
 |---|---|---|
 | Majority filter window | 3 x 3 pixels | `change.majority_filter_size` |
 | Minimum mapping unit | 0.5 ha | `change.minimum_mapping_unit_ha` |
+| Patch connectivity | 8-connected | `change.connectivity` |
 
 > **Why majority filter?** Random Forest classification produces salt-and-pepper
 > noise at 10 m. A 3x3 majority filter replaces isolated misclassified pixels
 > with their neighbourhood majority class — standard post-processing in published
-> studies. The filter is applied BEFORE transition matrix computation.
+> studies. The implementation keeps nodata centers and uses nodata padding at
+> edges; ties retain the center class if tied, otherwise the lowest class ID wins.
+> It then removes 8-connected same-class patches below the MMU to unclassified
+> (0), rather than assigning a neighboring class. The processed maps feed the
+> transition matrix.
 > **Why 0.5 ha MMU?** Below this size, the patch is smaller than 50 pixels and
-> is likely a classification artefact rather than a real land-cover unit.
+> is likely a classification artefact rather than a real land-cover unit. This
+> is a mapping rule, not evidence that a removed patch is erroneous.
 
 ---
 

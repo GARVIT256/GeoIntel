@@ -47,6 +47,8 @@ def extract_feature_stack(
     composite: xr.DataArray,
     slope: xr.DataArray | np.ndarray | None = None,
     aspect: xr.DataArray | np.ndarray | None = None,
+    aspect_sin: xr.DataArray | np.ndarray | None = None,
+    aspect_cos: xr.DataArray | np.ndarray | None = None,
 ) -> tuple[np.ndarray, tuple[int, int]]:
     """
     Construct a (N_pixels, 13) feature matrix from composite and terrain data.
@@ -80,7 +82,15 @@ def extract_feature_stack(
         slope_val = slope.values if isinstance(slope, xr.DataArray) else slope
         slope_np = slope_val.reshape(1, h, w).astype("float32")
 
-    if aspect is None:
+    if (aspect_sin is None) != (aspect_cos is None):
+        raise ValueError("aspect_sin and aspect_cos must be supplied together")
+    if aspect_sin is not None and aspect_cos is not None:
+        sin_value = aspect_sin.values if isinstance(aspect_sin, xr.DataArray) else aspect_sin
+        cos_value = aspect_cos.values if isinstance(aspect_cos, xr.DataArray) else aspect_cos
+        aspect_features = np.stack([
+            sin_value.reshape(h, w), cos_value.reshape(h, w)
+        ]).astype("float32")
+    elif aspect is None:
         aspect_features = np.zeros((2, h, w), dtype="float32")
     else:
         aspect_val = aspect.values if isinstance(aspect, xr.DataArray) else aspect
@@ -98,6 +108,8 @@ def generate_pseudo_training_data(
     composite: xr.DataArray,
     slope: xr.DataArray | np.ndarray | None = None,
     aspect: xr.DataArray | np.ndarray | None = None,
+    aspect_sin: xr.DataArray | np.ndarray | None = None,
+    aspect_cos: xr.DataArray | np.ndarray | None = None,
     n_samples_per_class: int = 500,
     seed: int = 42,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -111,7 +123,9 @@ def generate_pseudo_training_data(
     y_train : ndarray of shape (N_samples,)
     """
     rule_map = classify_rule_based(composite).values.ravel()
-    X, _ = extract_feature_stack(composite, slope, aspect)
+    X, _ = extract_feature_stack(
+        composite, slope, aspect, aspect_sin=aspect_sin, aspect_cos=aspect_cos
+    )
 
     rng = np.random.default_rng(seed)
     X_list, y_list = [], []
@@ -190,9 +204,15 @@ def train_rf_classifier(
         "feature_importances": dict(zip(FEATURE_NAMES, rf.feature_importances_.tolist())),
         "label_source": "rule_based_pseudo_labels",
         "validation_status": "bootstrap only; circular, not independent accuracy",
+        "metric_interpretation": (
+            "CV and OOB scores measure agreement with rule-derived pseudo-labels, "
+            "not agreement with reference truth."
+        ),
     }
 
-    logger.info("RF Model Trained. OOB Score: %.4f, CV Acc: %.4f (+/- %.4f)",
+    logger.warning(
+        "RF bootstrap-only diagnostics: OOB=%.4f CV agreement with rules=%.4f (+/- %.4f); "
+        "not independent accuracy.",
                 metrics["oob_score"], metrics["cv_accuracy_mean"], metrics["cv_accuracy_std"])
     return rf, metrics
 
@@ -202,11 +222,15 @@ def predict_rf_lulc(
     composite: xr.DataArray,
     slope: xr.DataArray | np.ndarray | None = None,
     aspect: xr.DataArray | np.ndarray | None = None,
+    aspect_sin: xr.DataArray | np.ndarray | None = None,
+    aspect_cos: xr.DataArray | np.ndarray | None = None,
 ) -> xr.DataArray:
     """
     Apply a trained Random Forest model to classify a full composite into a five-class LULC raster.
     """
-    X, (h, w) = extract_feature_stack(composite, slope, aspect)
+    X, (h, w) = extract_feature_stack(
+        composite, slope, aspect, aspect_sin=aspect_sin, aspect_cos=aspect_cos
+    )
     
     # Handle NaNs in test feature matrix
     valid_mask = ~np.isnan(X).any(axis=1)

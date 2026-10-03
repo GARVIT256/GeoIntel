@@ -35,9 +35,9 @@ logger = get_logger(__name__)
 LULC_CLASSES = {
     0: "Unclassified",
     1: "Built-up",
-    2: "Tree/dense vegetation",
-    3: "Cropland/grass/low vegetation",
-    4: "Bare/sparse",
+    2: "Tree",
+    3: "Cropland/grass",
+    4: "Bare",
     5: "Water",
 }
 
@@ -97,7 +97,7 @@ def classify_rule_based(
     built_mask = land_mask & (ndbi > ndvi) & (ndbi > 0.0)
     lulc[built_mask] = 1
 
-    # Remaining land mask
+    # Remaining land mask after higher-priority water and built-up rules.
     rem_land_mask = land_mask & (~built_mask)
 
     # Rules 3-4 separate dense/tree cover from lower vegetation.
@@ -106,7 +106,8 @@ def classify_rule_based(
     crop_mask = rem_land_mask & (~tree_mask) & (ndvi > 0.25)
     lulc[crop_mask] = 3
 
-    # Bare/sparse requires positive BSI; ambiguous valid pixels stay unclassified.
+    # Bare/sparse is lower priority than vegetation and requires both cues.
+    # Low-NDVI pixels with BSI <= 0 remain unclassified.
     soil_mask = rem_land_mask & (~tree_mask) & (~crop_mask) & (bsi > 0.0)
     lulc[soil_mask] = 4
 

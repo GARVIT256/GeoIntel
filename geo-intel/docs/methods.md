@@ -45,17 +45,15 @@ GEO-INTEL uses a five-class scheme, matching `config/config.yaml`:
 | **5** | Water | Rivers, reservoirs, lakes, ponds | `#1F78B4` |
 | **0** | Unclassified | No-data / cloud-masked pixels | `#000000` |
 
-The five classes restore the original planned tree-versus-cropland/grass distinction.
-The change from the earlier four-class code to five classes was not approved; four-class
-results are superseded and must not be compared directly with five-class outputs.
+The five classes are the approved scheme. Unclassified pixels use code 0 and are excluded from class-area comparisons.
 
 ### 2.1 Baseline 1: Rule-Based Decision Tree Classifier
-Non-overlapping physical decision hierarchy:
+Strict priority: water > built-up > tree > cropland/grass > bare > unclassified.
 1. **Water (class 5)**: $\text{MNDWI} > 0.0$
-2. **Built-up (class 1)**: $\text{MNDWI} \le 0.0 \land \text{NDBI} > \text{NDVI} \land \text{NDBI} > 0.0$
-3. **Tree/dense vegetation (class 2)**: $\text{NDVI} > 0.50$
-4. **Cropland/grass/low vegetation (class 3)**: $0.25 < \text{NDVI} \le 0.50$
-5. **Bare/sparse (class 4)**: $\text{BSI} > 0.0 \land \text{NDVI} \le 0.25$; other valid land stays unclassified.
+2. **Built-up (class 1)**: $\text{NDBI} > \text{NDVI} \land \text{NDBI} > 0.0$
+3. **Tree (class 2)**: $\text{NDVI} > 0.50$
+4. **Cropland/grass (class 3)**: $0.25 < \text{NDVI} \le 0.50$
+5. **Bare (class 4)**: $\text{BSI} > 0.0 \land \text{NDVI} \le 0.25$; remaining valid pixels are unclassified (0). BSI <= 0 and NDVI <= 0.25 is unclassified absent a higher-priority match.
 
 ### 2.2 Baseline 2: Supervised Random Forest Classifier
 * **Feature Vector (13 features)**:
@@ -65,13 +63,21 @@ Non-overlapping physical decision hierarchy:
 * **Bootstrap only**: Pseudo-labels are extracted from the rule-based classifier. This is circular; RF agreement with those labels is not independent accuracy and must not be reported as such.
 * **Model Parameters**: 100 decision trees, out-of-bag scoring enabled (`oob_score=True`), balanced class weighting (`class_weight='balanced'`).
 * **Independent validation**: Use `src/geointel/change/accuracy.py` with supplied `data/labels/labels.csv`; metrics are evaluated on spatially held-out blocks and are unavailable until reference labels exist.
-* **Terrain aspect**: Encoded with sine and cosine to preserve circularity (0° adjacent to 360°).
+* **Terrain resampling**: Copernicus DEM elevation is 30 m. Derive slope and aspect on that native grid; encode aspect to sine and cosine there, then bilinearly resample elevation, slope, aspect-sine, and aspect-cosine independently to the Sentinel-2 10 m reference grid. Do not interpolate aspect degrees across the 0°/360° seam. RF consumes the resampled sine/cosine features.
+
+### 2.3 Terrain preparation convention
+
+Copernicus DEM elevation is 30 m. Calculate slope, aspect, `sin(aspect)`, and
+`cos(aspect)` at the native 30 m grid. Resample elevation, slope, aspect-sine,
+and aspect-cosine to the Sentinel-2 10 m reference grid with bilinear
+interpolation. Never interpolate aspect degrees across its circular 0°/360°
+boundary. This records the pipeline convention; no real DEM output is claimed.
 
 ---
 
 ## 3. Transition Matrix & Change Statistics
 
-For two LULC maps $L_1$ (Epoch T1) and $L_2$ (Epoch T2) at 10 m resolution ($\text{Pixel Area} = 100\text{ m}^2 = 0.0001\text{ km}^2$), the matrix is $5 \times 5$ over class IDs 1–5. A pixel contributes only when both epochs are finite and have a class ID in 1–5; zero, NaN, and out-of-range IDs are excluded jointly.
+For two LULC maps $L_1$ (Epoch T1) and $L_2$ (Epoch T2) at 10 m resolution ($\text{Pixel Area} = 100\text{ m}^2 = 0.0001\text{ km}^2$), the matrix is $5 \times 5$ over class IDs 1–5. A pixel contributes only when both epochs are finite and have a class ID in 1–5; zero, NaN, and out-of-range IDs are excluded jointly. Each result includes the jointly excluded pixel count, excluded area in km², and percentage of the full raster footprint (not the independently measured AOI polygon area).
 
 $$M_{ij} = \text{Count of pixels where } L_1(x, y) = i \land L_2(x, y) = j \quad \text{for } i, j \in \{1, 2, 3, 4, 5\}$$
 
