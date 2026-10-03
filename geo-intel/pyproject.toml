@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geointel"
+version = "0.1.0"
+description = "GEO-INTEL: Agentic AI Framework for Automated Geospatial Research"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "GEO-INTEL Team" }]
+
+dependencies = [
+    # ── Geospatial core ─────────────────────────────────────────────────────
+    # Note: exact versions updated for Python 3.14 compatibility (2026-09)
+    "rasterio>=1.4.3",
+    "rioxarray>=0.17.0",
+    "xarray>=2024.6.0",
+    "geopandas>=1.1.0",
+    "shapely>=2.0.5",
+    "pyproj>=3.6.1",
+    "pyogrio>=0.10.0",
+
+    # ── STAC / data access ───────────────────────────────────────────────────
+    "pystac-client>=0.8.3",
+    "stackstac>=0.5.0",
+    "planetary-computer>=1.0.0",
+
+    # ── Raster statistics / spatial analysis ────────────────────────────────
+    "rasterstats>=0.20.0",
+    "esda>=2.5.1",
+    "libpysal>=4.12.1",
+    "scipy>=1.14.0",
+
+    # ── Machine learning ─────────────────────────────────────────────────────
+    "scikit-learn>=1.5.1",
+    "numpy>=1.26.4",
+    "pandas>=2.2.2",
+
+    # ── Visualisation ────────────────────────────────────────────────────────
+    "matplotlib>=3.9.1",
+    "seaborn>=0.13.2",
+    "folium>=0.17.0",
+    "leafmap>=0.36.4",
+
+    # ── Web / API ────────────────────────────────────────────────────────────
+    "fastapi>=0.112.0",
+    "uvicorn[standard]>=0.30.3",
+    "streamlit>=1.37.0",
+    "pydantic>=2.8.2",
+    "pydantic-settings>=2.4.0",
+
+    # ── RAG ──────────────────────────────────────────────────────────────────
+    "sentence-transformers>=3.0.1",
+    "faiss-cpu>=1.8.0",
+    "chromadb>=0.5.5",
+    "PyMuPDF>=1.24.9",
+
+    # ── Database ─────────────────────────────────────────────────────────────
+    "psycopg2-binary>=2.9.9",
+    "sqlalchemy>=2.0.31",
+
+    # ── Config / utils ───────────────────────────────────────────────────────
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.0.1",
+    "tqdm>=4.66.4",
+    "rich>=13.7.1",
+    "click>=8.1.7",
+    "httpx>=0.27.0",
+
+    # ── LLM clients (optional, loaded if API key present) ────────────────────
+    "openai>=1.40.0",
+    "anthropic>=0.33.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.2",
+    "pytest-cov==5.0.0",
+    "pytest-asyncio==0.23.8",
+    "ruff==0.5.7",
+    "mypy==1.11.1",
+    "ipykernel==6.29.5",
+    "jupyterlab==4.2.4",
+    "pre-commit==3.8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "UP", "N", "S", "ANN"]
+ignore = ["ANN101", "ANN102", "S101"]   # allow assert in tests
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true

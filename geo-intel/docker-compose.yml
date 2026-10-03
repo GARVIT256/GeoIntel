@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: geointel_postgis
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-geointel}
+      POSTGRES_USER: ${POSTGRES_USER:-geointel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/geointel/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-geointel} -d ${POSTGRES_DB:-geointel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Optional: pgAdmin for manual inspection ─────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:8.10
+    container_name: geointel_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@geointel.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      postgis:
+        condition: service_healthy
+    profiles: ["dev"]   # only start with: docker compose --profile dev up
+
+volumes:
+  pgdata:

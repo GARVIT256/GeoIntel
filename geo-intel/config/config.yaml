@@ -1,0 +1,128 @@
+# ============================================================
+# GEO-INTEL – master configuration
+# All parameters that appear elsewhere reference this file.
+# Change values HERE; never hard-code them in source.
+# ============================================================
+
+project:
+  name: geo-intel
+  version: "0.1.0"
+
+# --- Area of Interest ---
+aoi:
+  path: config/aoi_dehradun.geojson   # relative to repo root
+  # Bounding box (EPSG:4326) – used as a fast pre-filter before polygon clip
+  bbox: [77.938213, 30.081756, 78.207694, 30.488496]  # current bbox; polygonized, replacement pending approval
+  name: "Dehradun_AOI"
+
+# --- Epochs (dry-season composites, avoid Jun–Sep monsoon) ---
+epochs:
+  t1:
+    label: "2018-19"
+    start: "2018-11-01"
+    end:   "2019-03-31"
+  t2:
+    label: "2024-25"
+    start: "2024-11-01"
+    end:   "2025-03-31"
+
+# --- Sentinel-2 ---
+sentinel2:
+  collection: "sentinel-2-l2a"
+  max_cloud_cover: 30          # % – per-scene filter; compositing handles the rest
+  bands_10m: ["B02", "B03", "B04", "B08"]
+  bands_20m: ["B11", "B12"]    # resampled to 10 m with bilinear
+  scl_band: "SCL"
+  # SCL classes to MASK (cloud, shadow, snow, saturated, defective)
+  scl_mask_values: [0, 1, 2, 3, 8, 9, 10, 11]
+  min_valid_pixel_fraction: 0.70   # warn if any 10x10 km tile block < this
+  composite_method: "median"
+
+# --- CRS ---
+crs:
+  compute: "EPSG:32644"   # UTM 44N – area/distance here only
+  display_wgs84: "EPSG:4326"
+  display_web: "EPSG:3857"
+
+# --- Resolution ---
+resolution:
+  reference_m: 10          # native 10 m grid
+  resample_method_continuous: "bilinear"
+  resample_method_categorical: "nearest"
+
+# --- Land-cover class scheme ---
+classes:
+  1: {name: "built-up",                  color: "#E31A1C"}
+  2: {name: "tree/dense-vegetation",     color: "#33A02C"}
+  3: {name: "cropland/grass/low-veg",    color: "#B2DF8A"}
+  4: {name: "bare/sparse",               color: "#FDBF6F"}
+  5: {name: "water",                     color: "#1F78B4"}
+
+# --- Change detection ---
+change:
+  vegetation_classes: [2, 3]          # classes counted as "vegetation" in T1
+  built_class: 1
+  majority_filter_size: 3             # pixels (3x3 window)
+  minimum_mapping_unit_ha: 0.5        # polygons smaller than this are removed
+  ndvi_diff_threshold: -0.15          # ΔNDVi threshold for baseline comparison
+  grid_cell_size_m: 1000              # 1 km fishnet for association analysis
+
+# --- Spatial association ---
+association:
+  method: "spearman"
+  morans_i: true
+  getis_ord: true
+  alpha: 0.05
+  top_n_hotspots: 20
+
+# --- Classification ---
+classifier:
+  type: "random_forest"
+  n_estimators: 200
+  max_depth: null          # grow fully (let min_samples_leaf control depth)
+  min_samples_leaf: 5
+  class_weight: "balanced"
+  block_split:
+    block_size_m: 5000     # 5 km blocks for spatial CV to reduce leakage
+    test_blocks: 2
+  target_labels_per_class: 150   # target now; ~400 before final
+
+# --- RAG ---
+rag:
+  chunk_size: 512
+  chunk_overlap: 64
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  top_k: 5
+  store: "faiss"           # faiss | chroma | pgvector
+
+# --- Agent ---
+agent:
+  llm_temperature: 0.0
+  max_retries: 2
+  supported_task_types: ["urban_expansion_vegetation_loss"]
+  allowed_places: ["Dehradun"]   # expand later
+  causal_language_blacklist:
+    - "caused"
+    - "led to"
+    - "resulted in"
+    - "will flood"
+    - "responsible for"
+    - "drove"
+    - "triggered"
+    - "due to urban growth"
+
+# --- Reproducibility ---
+reproducibility:
+  numpy_seed: 42
+  sklearn_seed: 42
+  python_hash_seed: 0
+
+# --- Paths (relative to repo root) ---
+paths:
+  data_raw:       data/raw
+  data_interim:   data/interim
+  data_processed: data/processed
+  data_cache:     data/cache
+  data_labels:    data/labels
+  corpus:         data/corpus
+  manifests:      data/manifests

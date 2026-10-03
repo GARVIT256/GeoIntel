@@ -1,0 +1,33 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [77.938213, 30.081756],
+          [78.207694, 30.081756],
+          [78.207694, 30.488496],
+          [77.938213, 30.488496],
+          [77.938213, 30.081756]
+        ]]
+      },
+      "bbox": [
+        77.938213,
+        30.081756,
+        78.207694,
+        30.488496
+      ],
+      "properties": {
+        "label": "Dehradun - Uttarakhand, India",
+        "name": "Dehradun_AOI",
+        "crs_native": "EPSG:4326",
+        "crs_compute": "EPSG:32644",
+        "version": "v1.1_bbox_polygon_pending_aoi_approval",
+        "geometry_source": "existing_bbox",
+        "approval_status": "current footprint; corrected AOI pending approval"
+      }
+    }
+  ]
+}
