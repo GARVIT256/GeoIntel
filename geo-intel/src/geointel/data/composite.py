@@ -160,7 +160,7 @@ def load_stack(
     gdal_options = {
         "GDAL_HTTP_MAX_RETRY": "5",
         "GDAL_HTTP_RETRY_DELAY": "2",
-        "GDAL_CACHEMAX": "256",
+        "GDAL_CACHEMAX": 256,
         "GDAL_NUM_THREADS": "1",
         "VSI_CACHE": "TRUE",
         "VSI_CACHE_SIZE": "5000000",
