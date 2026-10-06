@@ -75,6 +75,51 @@ def _write_ndvi_difference(t1_path: Path, t2_path: Path, output_path: Path) -> P
     return output_path
 
 
+def _make_fast_window(cfg: dict, window_km: float) -> dict:
+    """Make one square analysis window inside the configured AOI in EPSG:32644."""
+    import json
+
+    from pyproj import Transformer
+    from shapely.geometry import box, shape
+    from shapely.ops import transform as transform_geometry
+
+    if not math.isfinite(window_km) or window_km <= 0:
+        raise ValueError("window_km must be a positive finite number")
+
+    aoi_path = Path(cfg["_repo_root"]) / cfg["aoi"]["path"]
+    geojson = json.loads(aoi_path.read_text(encoding="utf-8"))
+    aoi_wgs84 = shape(geojson["features"][0]["geometry"])
+    to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32644", always_xy=True)
+    to_wgs84 = Transformer.from_crs("EPSG:32644", "EPSG:4326", always_xy=True)
+    aoi_utm = transform_geometry(to_utm.transform, aoi_wgs84)
+    center_x, center_y = aoi_utm.centroid.x, aoi_utm.centroid.y
+    half_width_m = window_km * 500.0
+    window_utm = box(
+        center_x - half_width_m,
+        center_y - half_width_m,
+        center_x + half_width_m,
+        center_y + half_width_m,
+    )
+    if not aoi_utm.covers(window_utm):
+        raise ValueError(
+            f"{window_km:g} km window centered on the configured AOI centroid "
+            "extends outside the approved AOI"
+        )
+
+    # Keep geographic bounds for metadata; stack loading uses the exact
+    # projected bounds so the requested square remains exactly window_km wide.
+    window_wgs84 = transform_geometry(to_wgs84.transform, window_utm)
+    bounds_latlon = list(window_wgs84.bounds)
+    return {
+        "window_km": window_km,
+        "crs": "EPSG:32644",
+        "center_utm_m": [center_x, center_y],
+        "bounds_utm_m": list(window_utm.bounds),
+        "bounds_wgs84": bounds_latlon,
+        "grid_policy": "same EPSG:32644 bounds and 10 m resolution for T1 and T2",
+    }
+
+
 def run(
     repo: Path,
     output_dir: Path,
@@ -82,6 +127,7 @@ def run(
     fast_ndvi: bool = False,
     chunk_size: int | None = None,
     workers: int | None = None,
+    window_km: float | None = None,
 ) -> None:
     if sys.version_info[:2] not in {(3, 11), (3, 13)}:
         raise RuntimeError(f"Python 3.11 or 3.13 is supported; found {sys.version}")
@@ -95,6 +141,12 @@ def run(
     print(f"Provider: {provider}")
 
     cfg = load_config("config/config.yaml")
+    if window_km is not None and not fast_ndvi:
+        raise ValueError("--window-km is available only with --fast-ndvi")
+    # Fast mode defaults to a small real-data subset. Passing --window-km 10
+    # selects a larger subset; full-band mode continues to use the full AOI.
+    window_km = (5.0 if window_km is None else window_km) if fast_ndvi else None
+    spatial_subset = _make_fast_window(cfg, window_km) if fast_ndvi else None
     output_bands = ["B04", "B08"] if fast_ndvi else (
         list(cfg["sentinel2"]["bands_10m"])
         + list(cfg["sentinel2"]["bands_20m"])
@@ -105,6 +157,12 @@ def run(
         raise ValueError("chunk_size must be >=128 and workers must be >=1")
     print(f"Composite bands: {', '.join(output_bands)} plus SCL for masking")
     print(f"Spatial chunk size: {chunk_size}px | Dask workers: {workers}")
+    if spatial_subset:
+        print(
+            f"Real-data subset window: {spatial_subset['window_km']:g} x "
+            f"{spatial_subset['window_km']:g} km; center EPSG:32644="
+            f"{spatial_subset['center_utm_m']}"
+        )
     for epoch in ("t1", "t2"):
         cached = cfg["paths"]["data_cache"] / "composites" / epoch
         if cached.exists():
@@ -209,6 +267,10 @@ def run(
                 if month_balanced else "median across all retained observations"
             ),
         },
+        "spatial_analysis": {
+            "is_real_data_subset_analysis": bool(fast_ndvi),
+            **(spatial_subset or {"window_km": None, "crs": "EPSG:32644"}),
+        },
         "epochs": {epoch: [item.to_dict() for item in scenes[epoch]] for epoch in scenes},
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -223,6 +285,7 @@ def run(
             cfg, epoch, manifest=manifest, force_refresh=True, provider=provider,
             items=scenes[epoch], matched_months=matched_months,
             bands=output_bands, chunk_size=chunk_size, workers=workers,
+            bounds=(spatial_subset["bounds_utm_m"] if spatial_subset else None),
         )
         for epoch in ("t1", "t2")
     }
@@ -294,6 +357,20 @@ def run(
         f"Mode: **{'fast NDVI' if fast_ndvi else 'full-band'}**; output bands: `{', '.join(output_bands)}`; SCL used for masking. Chunk size: `{chunk_size}` pixels; Dask workers: `{workers}`.",
         "",
     ])
+    if spatial_subset:
+        report.extend([
+            "## Spatial analysis window", "",
+            f"Real-data subset analysis: **yes**; square window: **{spatial_subset['window_km']:g} x {spatial_subset['window_km']:g} km**; CRS: `{spatial_subset['crs']}`; center (E, N): `{spatial_subset['center_utm_m']}` m.",
+            f"Shared projected bounds passed to stack loading (T1 and T2): `{spatial_subset['bounds_utm_m']}` m; corresponding WGS84 bounds: `{spatial_subset['bounds_wgs84']}`.",
+            "Both epochs use the same bounds, EPSG:32644, and 10 m resolution; the NDVI difference writer also checks raster dimensions, transform, and CRS before calculation.",
+            "",
+        ])
+    else:
+        report.extend([
+            "## Spatial analysis window", "",
+            "Real-data subset analysis: **no**; full configured AOI.",
+            "",
+        ])
     if ndvi_difference_path:
         report.extend([
             "## NDVI change output", "",
@@ -428,5 +505,8 @@ if __name__ == "__main__":
                         help="Spatial chunk pixels (default 512 fast, 256 full)")
     parser.add_argument("--workers", type=int,
                         help="Dask workers per output chunk (default 4 fast, 2 full)")
+    parser.add_argument("--window-km", type=float,
+                        help="Fast mode square subset size in km (default 5; centered on configured AOI centroid)")
     args = parser.parse_args()
-    run(args.repo, args.output, args.provider, args.fast_ndvi, args.chunk_size, args.workers)
+    run(args.repo, args.output, args.provider, args.fast_ndvi,
+        args.chunk_size, args.workers, args.window_km)

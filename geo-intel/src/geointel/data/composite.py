@@ -84,6 +84,7 @@ def load_stack(
     provider: str = "pc",
     bands: list[str] | None = None,
     bounds_latlon: list[float] | None = None,
+    bounds: list[float] | None = None,
     chunksize: tuple[int, int, int, int] = (1, 1, 256, 256),
 ) -> xr.DataArray:
     """
@@ -194,7 +195,6 @@ def load_stack(
     stack_options = {
         "epsg": compute_epsg,
         "resolution": resolution_m,
-        "bounds_latlon": bbox_4326,
         "xy_coords": "center",
         "dtype": "float32",
         "fill_value": np.float32(np.nan),
@@ -207,6 +207,12 @@ def load_stack(
             RasterioIOError("Read failed.*"),
         ),
     }
+    if bounds is not None:
+        # Explicit bounds are already in the target CRS, giving subset runs an
+        # exact projected extent and aligned 10 m grid in both epochs.
+        stack_options["bounds"] = bounds
+    else:
+        stack_options["bounds_latlon"] = bbox_4326
 
     spectral_stack = stackstac.stack(
         ordered_items,
@@ -650,6 +656,8 @@ def build_composite_for_epoch(
     bands: list[str] | None = None,
     chunk_size: int = 256,
     workers: int = 2,
+    bounds_latlon: list[float] | None = None,
+    bounds: list[float] | None = None,
 ) -> dict[str, Any]:
     """
     Full pipeline for one epoch: fetch → mask → composite → save COG.
@@ -743,6 +751,8 @@ def build_composite_for_epoch(
         epoch_key,
         provider=provider,
         bands=selected_bands,
+        bounds_latlon=bounds_latlon,
+        bounds=bounds,
         chunksize=(1, 1, chunk_size, chunk_size),
     )
 
