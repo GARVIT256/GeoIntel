@@ -474,6 +474,7 @@ def write_chunked_composites(
     partial_dir: Path,
     chunk_size: int = 256,
     max_attempts: int = 3,
+    num_workers: int = 2,
 ) -> dict[str, Any]:
     """Retry, persist, and mosaic spatial chunks without holding the full raster in RAM."""
     import dask
@@ -537,7 +538,7 @@ def write_chunked_composites(
                             composite_chunk,
                             fraction_chunk,
                             scheduler="threads",
-                            num_workers=2,
+                            num_workers=num_workers,
                         )
                         values = np.asarray(computed.values, dtype=np.float32)
                         fraction_values = np.asarray(computed_fraction.values, dtype=np.float32)
@@ -646,6 +647,9 @@ def build_composite_for_epoch(
     provider: str = "pc",
     items: list[Any] | None = None,
     matched_months: list[int] | None = None,
+    bands: list[str] | None = None,
+    chunk_size: int = 256,
+    workers: int = 2,
 ) -> dict[str, Any]:
     """
     Full pipeline for one epoch: fetch → mask → composite → save COG.
@@ -729,7 +733,18 @@ def build_composite_for_epoch(
         manifest.start_timer(f"load_stack_{epoch_key}")
 
     logger.info("Loading raster stack for epoch=%s (%d scenes)...", epoch_key, len(items))
-    stack = load_stack(items, cfg, epoch_key, provider=provider)
+    selected_bands = bands or (
+        list(cfg["sentinel2"]["bands_10m"])
+        + list(cfg["sentinel2"]["bands_20m"])
+    )
+    stack = load_stack(
+        items,
+        cfg,
+        epoch_key,
+        provider=provider,
+        bands=selected_bands,
+        chunksize=(1, 1, chunk_size, chunk_size),
+    )
 
     if manifest:
         manifest.stop_timer(f"load_stack_{epoch_key}")
@@ -747,9 +762,9 @@ def build_composite_for_epoch(
 
     # ── Select spectral bands only (in BAND_ORDER) ─────────────────────────
     available_bands = list(masked_stack.coords["band"].values)
-    ordered = [b for b in BAND_ORDER if b in available_bands]
-    if len(ordered) < len(BAND_ORDER):
-        missing = set(BAND_ORDER) - set(ordered)
+    ordered = [b for b in selected_bands if b in available_bands]
+    if len(ordered) < len(selected_bands):
+        missing = set(selected_bands) - set(ordered)
         logger.warning("Missing bands from stack: %s", missing)
     spectral = masked_stack.sel(band=ordered)
 
@@ -773,8 +788,10 @@ def build_composite_for_epoch(
     min_frac: float = cfg["sentinel2"]["min_valid_pixel_fraction"]
     partial_dir = cache_dir / "partials" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     logger.info(
-        "Writing chunked COGs [epoch=%s]: chunk=256 px, workers=2, retries=3",
+        "Writing chunked COGs [epoch=%s]: chunk=%d px, workers=%d, retries=3",
         epoch_key,
+        chunk_size,
+        workers,
     )
     stats = write_chunked_composites(
         composite,
@@ -782,8 +799,9 @@ def build_composite_for_epoch(
         composite_path,
         valid_frac_path,
         partial_dir,
-        chunk_size=256,
+        chunk_size=chunk_size,
         max_attempts=3,
+        num_workers=workers,
     )
     coverage_ok = stats["valid_fraction_mean"] >= min_frac
     logger.info(

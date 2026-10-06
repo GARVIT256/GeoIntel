@@ -21,7 +21,68 @@ from geointel.utils.config import load_config
 from geointel.utils.manifest import RunManifest
 
 
-def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
+def _write_ndvi_difference(t1_path: Path, t2_path: Path, output_path: Path) -> Path:
+    """Stream T2-minus-T1 NDVI from the compact B04/B08 composite COGs."""
+    from rasterio.shutil import copy as raster_copy
+
+    with rasterio.open(t1_path) as t1, rasterio.open(t2_path) as t2:
+        if (t1.width, t1.height, t1.transform, t1.crs) != (
+            t2.width, t2.height, t2.transform, t2.crs
+        ):
+            raise ValueError("T1 and T2 compact composites must use the same grid")
+
+        def band_index(source: rasterio.DatasetReader, band: str) -> int:
+            descriptions = list(source.descriptions)
+            if descriptions and all(descriptions) and band in descriptions:
+                return descriptions.index(band) + 1
+            if source.count == 2:
+                return {"B04": 1, "B08": 2}[band]
+            raise ValueError(f"Could not identify {band} in {source.name}")
+
+        red1, nir1 = band_index(t1, "B04"), band_index(t1, "B08")
+        red2, nir2 = band_index(t2, "B04"), band_index(t2, "B08")
+        profile = t1.profile.copy()
+        profile.update(
+            driver="GTiff", count=1, dtype="float32", nodata=float("nan"),
+            compress="deflate", predictor=3, tiled=True,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path = output_path.with_name(f"{output_path.stem}.staged.tif")
+
+        def ndvi(red: np.ndarray, nir: np.ndarray) -> np.ndarray:
+            denominator = nir + red
+            valid = np.isfinite(red) & np.isfinite(nir) & (np.abs(denominator) > 1e-8)
+            result = np.full(red.shape, np.nan, dtype="float32")
+            np.divide(nir - red, denominator, out=result, where=valid)
+            return result
+
+        with rasterio.open(staged_path, "w", **profile) as destination:
+            for _, window in t1.block_windows(1):
+                red_t1 = t1.read(red1, window=window, masked=True).astype("float32").filled(np.nan)
+                nir_t1 = t1.read(nir1, window=window, masked=True).astype("float32").filled(np.nan)
+                red_t2 = t2.read(red2, window=window, masked=True).astype("float32").filled(np.nan)
+                nir_t2 = t2.read(nir2, window=window, masked=True).astype("float32").filled(np.nan)
+                difference = ndvi(red_t2, nir_t2) - ndvi(red_t1, nir_t1)
+                destination.write(difference.astype("float32"), 1, window=window)
+            destination.set_band_description(1, "NDVI T2 minus T1")
+
+    with rasterio.open(staged_path) as source:
+        raster_copy(
+            source, output_path, driver="COG", compress="DEFLATE", blocksize=256,
+            overview_resampling="AVERAGE",
+        )
+    staged_path.unlink(missing_ok=True)
+    return output_path
+
+
+def run(
+    repo: Path,
+    output_dir: Path,
+    provider: str = "aws",
+    fast_ndvi: bool = False,
+    chunk_size: int | None = None,
+    workers: int | None = None,
+) -> None:
     if sys.version_info[:2] not in {(3, 11), (3, 13)}:
         raise RuntimeError(f"Python 3.11 or 3.13 is supported; found {sys.version}")
     repo, output_dir = repo.resolve(), output_dir.resolve()
@@ -34,6 +95,16 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
     print(f"Provider: {provider}")
 
     cfg = load_config("config/config.yaml")
+    output_bands = ["B04", "B08"] if fast_ndvi else (
+        list(cfg["sentinel2"]["bands_10m"])
+        + list(cfg["sentinel2"]["bands_20m"])
+    )
+    chunk_size = chunk_size or (512 if fast_ndvi else 256)
+    workers = workers or (4 if fast_ndvi else 2)
+    if chunk_size < 128 or workers < 1:
+        raise ValueError("chunk_size must be >=128 and workers must be >=1")
+    print(f"Composite bands: {', '.join(output_bands)} plus SCL for masking")
+    print(f"Spatial chunk size: {chunk_size}px | Dask workers: {workers}")
     for epoch in ("t1", "t2"):
         cached = cfg["paths"]["data_cache"] / "composites" / epoch
         if cached.exists():
@@ -128,6 +199,9 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
         },
         "compositing": {
             "month_balanced": month_balanced,
+            "bands": output_bands,
+            "spatial_chunk_size": chunk_size,
+            "workers": workers,
             "matched_calendar_months": matched_months,
             "month_filtered_items": month_drops,
             "method": (
@@ -148,6 +222,7 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
         epoch: build_composite_for_epoch(
             cfg, epoch, manifest=manifest, force_refresh=True, provider=provider,
             items=scenes[epoch], matched_months=matched_months,
+            bands=output_bands, chunk_size=chunk_size, workers=workers,
         )
         for epoch in ("t1", "t2")
     }
@@ -167,31 +242,45 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
             source = Path(result[key])
             shutil.copy2(source, cog_dir / f"{epoch}_{source.name}")
 
-    band_names = ["B02", "B03", "B04", "B08", "B11", "B12"]
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-    for row, (title, bands) in enumerate(
-        (("RGB B04/B03/B02", ("B04", "B03", "B02")),
-         ("False colour B08/B04/B03", ("B08", "B04", "B03")))
-    ):
-        for col, epoch in enumerate(("t1", "t2")):
-            with rasterio.open(results[epoch]["composite_path"]) as src:
-                descriptions = list(src.descriptions)
-                names = descriptions if all(descriptions) else band_names
-                data = src.read([names.index(b) + 1 for b in bands], masked=True).filled(np.nan)
-            rgb = np.zeros_like(data, dtype="float32")
-            for index, band in enumerate(data):
-                finite = np.isfinite(band)
-                if finite.any():
-                    low, high = np.nanpercentile(band[finite], (2, 98))
-                    if high > low:
-                        rgb[index] = np.clip((band - low) / (high - low), 0, 1)
-            axes[row, col].imshow(np.moveaxis(rgb, 0, -1))
-            axes[row, col].set_title(f"{title} — {epoch.upper()}")
-            axes[row, col].axis("off")
-    fig.tight_layout()
-    fig.savefig(output_dir / "t1_t2_previews.png", dpi=160, bbox_inches="tight")
-    plt.show()
-    plt.close(fig)
+    ndvi_difference_path = None
+    if fast_ndvi:
+        ndvi_difference_path = _write_ndvi_difference(
+            Path(results["t1"]["composite_path"]),
+            Path(results["t2"]["composite_path"]),
+            cog_dir / "ndvi_difference_t2_minus_t1.tif",
+        )
+        metadata["outputs"] = {"ndvi_difference_t2_minus_t1": str(ndvi_difference_path)}
+        (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        print(f"NDVI difference COG: {ndvi_difference_path}")
+
+    band_names = output_bands
+    if fast_ndvi:
+        print("Skipping RGB previews: fast mode contains only B04 and B08.")
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+        for row, (title, bands) in enumerate(
+            (("RGB B04/B03/B02", ("B04", "B03", "B02")),
+             ("False colour B08/B04/B03", ("B08", "B04", "B03")))
+        ):
+            for col, epoch in enumerate(("t1", "t2")):
+                with rasterio.open(results[epoch]["composite_path"]) as src:
+                    descriptions = list(src.descriptions)
+                    names = descriptions if all(descriptions) else band_names
+                    data = src.read([names.index(b) + 1 for b in bands], masked=True).filled(np.nan)
+                rgb = np.zeros_like(data, dtype="float32")
+                for index, band in enumerate(data):
+                    finite = np.isfinite(band)
+                    if finite.any():
+                        low, high = np.nanpercentile(band[finite], (2, 98))
+                        if high > low:
+                            rgb[index] = np.clip((band - low) / (high - low), 0, 1)
+                axes[row, col].imshow(np.moveaxis(rgb, 0, -1))
+                axes[row, col].set_title(f"{title} — {epoch.upper()}")
+                axes[row, col].axis("off")
+        fig.tight_layout()
+        fig.savefig(output_dir / "t1_t2_previews.png", dpi=160, bbox_inches="tight")
+        plt.show()
+        plt.close(fig)
 
     report = [
         "# Data report", "",
@@ -200,6 +289,17 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
         f"STAC provider: `{provider}`", "",
         "## Scene IDs", "",
     ]
+    report.extend([
+        "## Composite configuration", "",
+        f"Mode: **{'fast NDVI' if fast_ndvi else 'full-band'}**; output bands: `{', '.join(output_bands)}`; SCL used for masking. Chunk size: `{chunk_size}` pixels; Dask workers: `{workers}`.",
+        "",
+    ])
+    if ndvi_difference_path:
+        report.extend([
+            "## NDVI change output", "",
+            "T2 minus T1 NDVI difference COG: `cogs/ndvi_difference_t2_minus_t1.tif`.",
+            "",
+        ])
     for epoch in ("t1", "t2"):
         report.extend([f"### {epoch.upper()}", ""])
         report.extend(f"- `{item.id}`" for item in scenes[epoch])
@@ -322,5 +422,11 @@ if __name__ == "__main__":
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--provider", choices=("aws", "pc"), default="aws")
+    parser.add_argument("--fast-ndvi", action="store_true",
+                        help="Build B04/B08 composites with SCL masking and a T2-T1 NDVI COG")
+    parser.add_argument("--chunk-size", type=int,
+                        help="Spatial chunk pixels (default 512 fast, 256 full)")
+    parser.add_argument("--workers", type=int,
+                        help="Dask workers per output chunk (default 4 fast, 2 full)")
     args = parser.parse_args()
-    run(args.repo, args.output, args.provider)
+    run(args.repo, args.output, args.provider, args.fast_ndvi, args.chunk_size, args.workers)
