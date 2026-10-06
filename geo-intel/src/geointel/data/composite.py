@@ -277,7 +277,8 @@ def normalize_l2a_reflectance(
     normalized.attrs.update(stack.attrs)
     normalized.attrs["reflectance_scale"] = 0.0001
     normalized.attrs["boa_offset_application"] = (
-        "asset raster:bands offset once; suppress -0.1 when Earth Search flag is true"
+        "asset raster:bands offset once; PB4+ post-2022 fallback when offset is absent/zero; "
+        "suppress duplicate -0.1 when Earth Search flag is true"
     )
     return normalized
 
@@ -309,10 +310,24 @@ def reflectance_scale_offset(item: Any, band: str) -> tuple[float, float]:
     # that correction once, not once in the COG plus once while scaling.
     if boa_applied is True and np.isclose(offset, -0.1):
         offset = 0.0
-    elif boa_applied is False and baseline >= 4.0 and np.isclose(offset, 0.0):
-        # A false flag means the COG does not include the PB4+ BOA correction;
-        # apply it even when the raster extension omitted its nonzero offset.
-        offset = -0.1
+    else:
+        acquired = str(
+            item.properties.get("datetime") or item.properties.get("start_datetime") or ""
+        )[:10]
+        if (
+            boa_applied is not True
+            and baseline >= 4.0
+            and acquired >= "2022-01-25"
+            and np.isclose(offset, 0.0)
+        ):
+            # PB4 introduced the -1000 DN L2A BOA_ADD_OFFSET on acquisitions
+            # from 2022-01-25. Historical archive products later reprocessed
+            # with PB05 are already radiometrically harmonized; do not infer a
+            # second offset for those pre-2022 acquisition dates. Some catalog
+            # providers omit raster:bands.offset and the Earth Search-specific
+            # flag, so the acquisition date + baseline provide the fallback.
+            # The explicit true flag still prevents duplicate application.
+            offset = -0.1
     return scale, offset
 
 

@@ -15,9 +15,11 @@ def _item(flag: bool | None, offset: float = -0.1) -> SimpleNamespace:
     asset = SimpleNamespace(extra_fields={"raster:bands": [{"scale": 0.0001, "offset": offset}]})
     return SimpleNamespace(
         id="fixture",
-        properties={"s2:processing_baseline": "05.00", **(
-            {} if flag is None else {"earthsearch:boa_offset_applied": flag}
-        )},
+        properties={
+            "s2:processing_baseline": "05.00",
+            "datetime": "2024-12-09T05:00:00Z",
+            **({} if flag is None else {"earthsearch:boa_offset_applied": flag}),
+        },
         assets={"B04": asset},
     )
 
@@ -46,9 +48,23 @@ def test_absent_earthsearch_flag_uses_stac_raster_offset_once() -> None:
     assert 1500 * scale + offset == pytest.approx(0.05)
 
 
-def test_absent_earthsearch_flag_does_not_infer_offset_from_baseline() -> None:
-    # Missing is not equivalent to False: no Earth Search fallback is applied.
+def test_absent_earthsearch_flag_uses_baseline_fallback_when_offset_is_zero() -> None:
+    # Sentinel-2 PB4+ uses BOA_ADD_OFFSET=-1000 DN; PC need not provide the
+    # Earth Search flag for the processing-baseline fallback to apply.
     scale, offset = reflectance_scale_offset(_item(None, offset=0.0), "B04")
+    assert 1500 * scale + offset == pytest.approx(0.05)
+
+
+def test_historical_pb05_without_flag_does_not_get_post_2022_fallback() -> None:
+    item = _item(None, offset=0.0)
+    item.properties["datetime"] = "2019-03-16T05:26:49Z"
+    scale, offset = reflectance_scale_offset(item, "B04")
+    assert 1500 * scale + offset == pytest.approx(0.15)
+
+
+def test_true_flag_with_zero_raster_offset_does_not_apply_baseline_fallback() -> None:
+    # An explicit true flag says the provider already applied the correction.
+    scale, offset = reflectance_scale_offset(_item(True, offset=0.0), "B04")
     assert 1500 * scale + offset == pytest.approx(0.15)
 
 
