@@ -11,11 +11,13 @@ import xarray as xr
 from geointel.data.composite import compute_month_balanced_composite, reflectance_scale_offset
 
 
-def _item(flag: bool, offset: float = -0.1) -> SimpleNamespace:
+def _item(flag: bool | None, offset: float = -0.1) -> SimpleNamespace:
     asset = SimpleNamespace(extra_fields={"raster:bands": [{"scale": 0.0001, "offset": offset}]})
     return SimpleNamespace(
         id="fixture",
-        properties={"earthsearch:boa_offset_applied": flag, "s2:processing_baseline": "05.00"},
+        properties={"s2:processing_baseline": "05.00", **(
+            {} if flag is None else {"earthsearch:boa_offset_applied": flag}
+        )},
         assets={"B04": asset},
     )
 
@@ -35,6 +37,19 @@ def test_unapplied_boa_offset_uses_raster_band_offset_once() -> None:
 def test_unapplied_boa_offset_has_baseline_fallback_when_band_offset_missing() -> None:
     scale, offset = reflectance_scale_offset(_item(False, offset=0.0), "B04")
     assert 1500 * scale + offset == pytest.approx(0.05)
+
+
+def test_absent_earthsearch_flag_uses_stac_raster_offset_once() -> None:
+    # Planetary Computer does not provide the Earth Search-specific property.
+    # With no provider flag, use the asset's declared scale/offset as-is.
+    scale, offset = reflectance_scale_offset(_item(None, offset=-0.1), "B04")
+    assert 1500 * scale + offset == pytest.approx(0.05)
+
+
+def test_absent_earthsearch_flag_does_not_infer_offset_from_baseline() -> None:
+    # Missing is not equivalent to False: no Earth Search fallback is applied.
+    scale, offset = reflectance_scale_offset(_item(None, offset=0.0), "B04")
+    assert 1500 * scale + offset == pytest.approx(0.15)
 
 
 def test_month_balanced_composite_equalizes_month_contribution() -> None:
