@@ -278,7 +278,7 @@ def normalize_l2a_reflectance(
     normalized.attrs["reflectance_scale"] = 0.0001
     normalized.attrs["boa_offset_application"] = (
         "asset raster:bands offset once; PB4+ post-2022 fallback when offset is absent/zero; "
-        "suppress duplicate -0.1 when Earth Search flag is true"
+        "suppress -0.1 for flagged Earth Search Sentinel-2 COGs observed already harmonized"
     )
     return normalized
 
@@ -286,11 +286,11 @@ def normalize_l2a_reflectance(
 def reflectance_scale_offset(item: Any, band: str) -> tuple[float, float]:
     """Return the DN scale/offset transform applied to one item's reflectance band.
 
-    Earth Search's ``earthsearch:boa_offset_applied`` describes whether its
-    -0.1 BOA offset is already baked into that COG. Some Earth Search items
-    retain ``raster:bands.offset=-0.1`` even when the flag is true, so the flag
-    takes precedence for that specific BOA correction to prevent double use.
-    Other raster offsets remain honored as declared.
+    Earth Search Sentinel-2 items can retain ``raster:bands.offset=-0.1`` even
+    when their COG pixels are already harmonized. Project diagnostics include
+    such an example with the flag false, so for items carrying the
+    Earth-Search-specific property the declared -0.1 is suppressed. Generic
+    assets without that property continue to use declared STAC offsets.
     """
     assets = getattr(item, "assets", {})
     asset = assets.get(band) or assets.get(AWS_ASSET_KEYS.get(band, ""))
@@ -305,17 +305,20 @@ def reflectance_scale_offset(item: Any, band: str) -> tuple[float, float]:
         baseline = float(item.properties.get("s2:processing_baseline", 0.0))
     except (TypeError, ValueError):
         baseline = 0.0
-    # Earth Search can leave raster:bands.offset=-0.1 on COGs whose pixel
-    # values already include it. Honor its explicit per-item state to apply
-    # that correction once, not once in the COG plus once while scaling.
-    if boa_applied is True and np.isclose(offset, -0.1):
+    is_earth_search_item = "earthsearch:boa_offset_applied" in item.properties
+    # Earth Search Sentinel-2 COGs have exhibited mismatches between this flag,
+    # the declared -0.1 raster offset, and sampled pixels. For flagged Earth
+    # Search items the tested COG pixels are already BOA-harmonized, including
+    # examples carrying a false flag; suppress that declared -0.1 to avoid a
+    # second correction. This narrow exception does not change generic STAC.
+    if is_earth_search_item and np.isclose(offset, -0.1):
         offset = 0.0
     else:
         acquired = str(
             item.properties.get("datetime") or item.properties.get("start_datetime") or ""
         )[:10]
         if (
-            boa_applied is not True
+            not (is_earth_search_item and boa_applied is True)
             and baseline >= 4.0
             and acquired >= "2022-01-25"
             and np.isclose(offset, 0.0)

@@ -30,10 +30,12 @@ def test_earthsearch_boa_offset_is_applied_exactly_once_for_true_flag() -> None:
     assert 500 * scale + offset == pytest.approx(0.05)
 
 
-def test_unapplied_boa_offset_uses_raster_band_offset_once() -> None:
+def test_earthsearch_false_flag_does_not_double_apply_offset_to_harmonized_cog() -> None:
     scale, offset = reflectance_scale_offset(_item(False), "B04")
-    # Unshifted DN 1500 gets scale then -0.1, matching the baked-offset case.
-    assert 1500 * scale + offset == pytest.approx(0.05)
+    # The supplied raw-DN diagnostic found this Earth Search COG already
+    # harmonized despite its false flag and declared -0.1 raster offset.
+    assert offset == pytest.approx(0.0)
+    assert 500 * scale + offset == pytest.approx(0.05)
 
 
 def test_unapplied_boa_offset_has_baseline_fallback_when_band_offset_missing() -> None:
