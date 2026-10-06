@@ -29,7 +29,7 @@ epochs:
 # --- Sentinel-2 ---
 sentinel2:
   collection: "sentinel-2-l2a"
-  max_cloud_cover: 30          # % – per-scene filter; compositing handles the rest
+  max_cloud_cover: null        # tile-level cutoff disabled; mask cloudy SCL pixels over AOI
   bands_10m: ["B02", "B03", "B04", "B08"]
   bands_20m: ["B11", "B12"]    # resampled to 10 m with bilinear
   scl_band: "SCL"
@@ -37,6 +37,10 @@ sentinel2:
   scl_mask_values: [0, 1, 2, 3, 8, 9, 10, 11]
   min_valid_pixel_fraction: 0.70   # warn if any 10x10 km tile block < this
   composite_method: "median"
+
+# --- Temporal balance ---
+composite:
+  month_balanced: true          # intersect month numbers across epochs; monthly median, equal-month final median
 
 # --- CRS ---
 crs:

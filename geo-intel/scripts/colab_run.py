@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import sys
+from collections import Counter
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -21,8 +22,8 @@ from geointel.utils.manifest import RunManifest
 
 
 def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
-    if sys.version_info[:2] != (3, 11):
-        raise RuntimeError(f"Python 3.11 is required; found {sys.version}")
+    if sys.version_info[:2] not in {(3, 11), (3, 13)}:
+        raise RuntimeError(f"Python 3.11 or 3.13 is supported; found {sys.version}")
     repo, output_dir = repo.resolve(), output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     os.chdir(repo)
@@ -38,13 +39,66 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
         if cached.exists():
             shutil.rmtree(cached)
 
-    scenes = {}
+    discovered_scenes = {}
+    dedup_drops: dict[str, list[dict[str, object]]] = {"t1": [], "t2": []}
     for epoch in ("t1", "t2"):
-        scenes[epoch] = fetch_or_load(cfg, epoch, provider=provider, force_refresh=True)
-        if not scenes[epoch]:
+        discovered_scenes[epoch] = fetch_or_load(
+            cfg, epoch, provider=provider, force_refresh=True,
+            dropped_items=dedup_drops[epoch],
+        )
+        if not discovered_scenes[epoch]:
             raise RuntimeError(f"No scenes returned by {provider} for {epoch}")
+
+    expected_counts = {"t1": 36, "t2": 46}
+    scene_counts = {
+        epoch: {
+            "deduplicated_count": len(discovered_scenes[epoch]),
+            "expected_count": expected_counts[epoch],
+            "matches_expected": len(discovered_scenes[epoch]) == expected_counts[epoch],
+        }
+        for epoch in ("t1", "t2")
+    }
+    for epoch in ("t1", "t2"):
+        print(
+            f"{epoch.upper()} deduplicated scene count: {scene_counts[epoch]['deduplicated_count']} "
+            f"(expected {expected_counts[epoch]}; match={scene_counts[epoch]['matches_expected']})"
+        )
+
+    month_balanced = bool(cfg.get("composite", {}).get("month_balanced", False))
+    months_by_epoch = {
+        epoch: {int(str(item.properties["datetime"])[5:7]) for item in discovered_scenes[epoch]}
+        for epoch in ("t1", "t2")
+    }
+    matched_months = sorted(months_by_epoch["t1"] & months_by_epoch["t2"]) if month_balanced else None
+    if month_balanced and not matched_months:
+        raise RuntimeError("Month-balanced mode found no common calendar months")
+
+    scenes = {}
+    month_drops: dict[str, list[dict[str, str]]] = {"t1": [], "t2": []}
+    for epoch in ("t1", "t2"):
+        scenes[epoch] = discovered_scenes[epoch]
+        if matched_months is not None:
+            scenes[epoch] = []
+            for item in discovered_scenes[epoch]:
+                month = int(str(item.properties["datetime"])[5:7])
+                if month in matched_months:
+                    scenes[epoch].append(item)
+                else:
+                    month_drops[epoch].append({
+                        "scene_id": item.id,
+                        "date": str(item.properties["datetime"])[:10],
+                        "reason": "calendar month is not present in both epochs",
+                    })
+        if not scenes[epoch]:
+            raise RuntimeError(f"No {epoch} scenes remain after matched-month filtering")
         print(f"{epoch.upper()} scene IDs:")
         print(json.dumps([item.id for item in scenes[epoch]], indent=2))
+
+    monthly_distribution = {
+        epoch: dict(sorted(Counter(str(item.properties["datetime"])[:7] for item in scenes[epoch]).items()))
+        for epoch in ("t1", "t2")
+    }
+    print("Monthly scene distribution:", json.dumps(monthly_distribution, indent=2))
 
     metadata = {
         "provider": provider,
@@ -60,6 +114,27 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
             else "https://planetarycomputer.microsoft.com/api/stac/v1"
         ),
         "collection": "sentinel-2-l2a",
+        "scene_counts": scene_counts,
+        "monthly_scene_counts": monthly_distribution,
+        "deduplication": {
+            "key": "(MGRS tile, calendar date)",
+            "selection": "highest s2:processing_baseline; ties prefer S2A, then S2B, then S2C, then scene ID",
+            "dropped_items": dedup_drops,
+        },
+        "cloud_filtering": {
+            "tile_level_eo_cloud_cover_cutoff": cfg["sentinel2"].get("max_cloud_cover"),
+            "strategy": "mask invalid SCL pixels within the AOI; do not reject a scene by tile-wide cloud percentage",
+            "jan_feb_2019_scenes_dropped_by_cloud_cutoff": [],
+        },
+        "compositing": {
+            "month_balanced": month_balanced,
+            "matched_calendar_months": matched_months,
+            "month_filtered_items": month_drops,
+            "method": (
+                "median within each matched calendar month, then equal-month median"
+                if month_balanced else "median across all retained observations"
+            ),
+        },
         "epochs": {epoch: [item.to_dict() for item in scenes[epoch]] for epoch in scenes},
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -71,7 +146,8 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
     manifest._data["runtime"] = metadata["runtime"]
     results = {
         epoch: build_composite_for_epoch(
-            cfg, epoch, manifest=manifest, force_refresh=True, provider=provider
+            cfg, epoch, manifest=manifest, force_refresh=True, provider=provider,
+            items=scenes[epoch], matched_months=matched_months,
         )
         for epoch in ("t1", "t2")
     }
@@ -128,6 +204,55 @@ def run(repo: Path, output_dir: Path, provider: str = "aws") -> None:
         report.extend([f"### {epoch.upper()}", ""])
         report.extend(f"- `{item.id}`" for item in scenes[epoch])
         report.append("")
+    report.extend([
+        "## Scene selection and temporal balance", "",
+        "Deduplication key: `(MGRS tile, calendar date)`. Highest processing baseline is retained; same-baseline ties prefer S2A, then S2B, then S2C, then scene ID.",
+        "",
+        f"Month-balanced composites: **{'enabled' if month_balanced else 'disabled'}**. "
+        + (f"Shared calendar months used: {', '.join(map(str, matched_months or []))}. Each month is composited separately then receives equal weight in the final median."
+           if month_balanced else "All retained observations contribute to a single median."),
+        "",
+        "| Epoch | Deduplicated scenes | Expected | Count check |",
+        "|---|---:|---:|---|",
+    ])
+    for epoch in ("t1", "t2"):
+        count_info = scene_counts[epoch]
+        report.append(
+            f"| {epoch.upper()} | {count_info['deduplicated_count']} | {count_info['expected_count']} | "
+            f"{'PASS' if count_info['matches_expected'] else 'MISMATCH'} |"
+        )
+    report.extend([
+        "", "### Monthly distribution of composite input scenes", "",
+        "| Epoch | Year-month | Scene count |", "|---|---|---:|",
+    ])
+    for epoch in ("t1", "t2"):
+        for month, count in monthly_distribution[epoch].items():
+            report.append(f"| {epoch.upper()} | {month} | {count} |")
+    report.extend([
+        "", "### January/February 2019 scene drops", "",
+        "Tile-level cloud filtering is disabled; no scene is dropped on whole-tile cloud percentage. Cloud/shadow pixels are masked from SCL over the AOI. January/February scene IDs and reasons removed by deduplication are listed below; month-balance exclusions are also shown where applicable.",
+        "",
+    ])
+    jan_feb_drops = [
+        record for record in dedup_drops["t1"]
+        if str(record.get("calendar_date", "")).startswith(("2019-01", "2019-02"))
+    ] + [
+        record for record in month_drops["t1"]
+        if record.get("date", "").startswith(("2019-01", "2019-02"))
+    ]
+    if jan_feb_drops:
+        report.extend(
+            f"- `{record.get('dropped_scene_id', record.get('scene_id'))}` — {record.get('reason')}"
+            for record in jan_feb_drops
+        )
+    else:
+        report.append("- None. The tile-level cloud cutoff is disabled and no January/February 2019 T1 duplicates or unmatched-month items were dropped in this run.")
+    report.extend([
+        "", "## Reflectance offset comparison", "",
+        "Same-tile 2018-12-01 baseline 00.01 vs 05.00 window check: **NOT YET RUN**. Run `scripts/check_offset.py --metadata <output>/metadata.json`; its per-band means and differences are not available until then.",
+        "", "## Reprojection and tile seams", "",
+        "Source inspection confirms stackstac loads to EPSG:32644 at 10 m, with bilinear resampling for reflectance and nearest-neighbour for SCL. Output seam inspection and boundary QA: **NOT YET RUN** on Colab.",
+    ])
     report.extend([
         "## Valid-pixel coverage", "",
         "| Epoch | Mean valid-pixel coverage (%) |", "|---|---:|",

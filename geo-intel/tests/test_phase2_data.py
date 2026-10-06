@@ -508,6 +508,30 @@ class TestSceneDeduplication:
 
         assert [item.id for item in result] == ["S2B_44RKU_20190316_0_L2A"]
 
+    def test_deduplicates_calendar_date_across_times_and_platforms_with_audit_log(self) -> None:
+        from geointel.data.stac_fetch import deduplicate_scene_items
+
+        items = [
+            SimpleNamespace(id="S2C_44RKU_20181201", properties={
+                "datetime": "2018-12-01T05:20:00Z", "platform": "sentinel-2c",
+                "s2:mgrs_tile": "44RKU", "s2:processing_baseline": "05.00",
+            }),
+            SimpleNamespace(id="S2A_44RKU_20181201", properties={
+                "datetime": "2018-12-01T05:21:00Z", "platform": "sentinel-2a",
+                "s2:mgrs_tile": "44RKU", "s2:processing_baseline": "05.00",
+            }),
+            SimpleNamespace(id="old_product", properties={
+                "datetime": "2018-12-01T05:22:00Z", "platform": "sentinel-2b",
+                "s2:mgrs_tile": "44RKU", "s2:processing_baseline": "00.01",
+            }),
+        ]
+        dropped: list[dict[str, object]] = []
+
+        result = deduplicate_scene_items(items, dropped_items=dropped)
+
+        assert [item.id for item in result] == ["S2A_44RKU_20181201"]
+        assert {row["dropped_scene_id"] for row in dropped} == {"S2C_44RKU_20181201", "old_product"}
+
 
 # ---------------------------------------------------------------------------
 # DEM slope/aspect test

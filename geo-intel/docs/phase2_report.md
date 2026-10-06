@@ -1,9 +1,43 @@
-# GEO-INTEL — Phase 2 Completion Report
+# GEO-INTEL – Phase 2 Completion Report
 **Phase 2 — Data Acquisition and Preprocessing Pipeline**  
 **Project:** GEO-INTEL: An Agentic AI Framework for Automated Geospatial Research  
 **Status:** INCOMPLETE — unit tests are synthetic; real Sentinel-2 execution is tracked in [geo-intel/docs/data_report.md](geo-intel/docs/data_report.md)  
 
 ---
+
+## Follow-up Earth Search metadata audit (code changes; raster checks NOT YET RUN)
+
+The later Earth Search run metadata supplied for review reports provider Earth
+Search, Python 3.13.15, GDAL 3.8.4, and rasterio 1.5.1. The JSON itself is not in
+this workspace, so no scene inventory or pixel value is claimed in this addendum.
+
+- Items are deduplicated by `(MGRS tile, calendar date)`, retaining the highest
+  `s2:processing_baseline`. On a baseline tie, S2A is preferred over S2B, then
+  S2C, then lexical scene ID. The S2A preference keeps a deterministic sensor
+  choice where S2A/S2C collect on the same tile/date. Dropped IDs, kept IDs,
+  baselines, and reasons are logged and retained in the run metadata. Target
+  deduplicated counts are T1 **36** and T2 **46**; actual count checks remain
+  **NOT YET RUN**.
+- Tile-level `eo:cloud_cover` filtering is disabled. SCL cloud/shadow classes
+  are masked per pixel in the loaded AOI analysis window. This avoids excluding
+  an otherwise useful scene because clouds elsewhere on the tile inflate its
+  tile-wide percentage. January/February 2019 duplicate-drop IDs and reasons
+  require the fresh unfiltered STAC query and remain **NOT YET RUN**.
+- Month-balanced composites are enabled by default: take the calendar-month
+  intersection across epochs, form each month's pixel median, then take an
+  equal-month median. Actual matched months and date distribution remain
+  **NOT YET RUN**.
+- Earth Search describes `earthsearch:boa_offset_applied` as whether the -0.1
+  BOA correction is baked into the COG. The pipeline previously used
+  `raster:bands.offset` unconditionally, which could apply -0.1 again when that
+  flag was true. The updated transform suppresses that duplicate correction
+  when true and uses the declared offset once when false. Earth Search has
+  reported flag/pixel inconsistencies, so this is not a pixel-level conclusion;
+  the same-tile 2018-12-01 baseline 00.01/05.00 B04/B08/B11 comparison in
+  `scripts/check_offset.py` remains **NOT YET RUN**.
+- Source inspection confirms stackstac targets EPSG:32644 at 10 m, bilinear for
+  reflectance and nearest-neighbour for SCL. Actual reprojection and tile seam
+  QA on the hosted COGs remain **NOT YET RUN**.
 
 > [!IMPORTANT]
 > **Core Engineering Guarantee:** All numbers, CRS transformations, pixel resolutions, and bounding boxes in GEO-INTEL are calculated strictly by deterministic Remote Sensing/GIS tools. No spatial statistics or pixel values are inferred by LLMs.

@@ -3,8 +3,8 @@ data/stac_fetch.py — Sentinel-2 L2A STAC search for GEO-INTEL.
 
 Searches Microsoft Planetary Computer or AWS Earth Search for Sentinel-2
 L2A scenes covering the AOI and date windows defined in config.yaml.
-Filters by cloud cover, records scene metadata, and caches the item JSON
-so the pipeline can run fully offline after the first successful fetch.
+Optionally applies a tile-wide cloud property filter when configured, records
+same-tile/calendar-date deduplication drops, and caches retained item JSON.
 
 CRS: STAC bbox is always in EPSG:4326 (WGS 84). No coordinate computation
 is performed here; all spatial work is done in composite.py and gis/.
@@ -97,34 +97,73 @@ def _sign_item(item: pystac.Item, provider: str) -> pystac.Item:
     return item
 
 
-def deduplicate_scene_items(items: list[pystac.Item]) -> list[pystac.Item]:
-    """Keep one product per acquisition, platform, and MGRS tile."""
-    selected: dict[tuple[str, str, str], pystac.Item] = {}
+def deduplicate_scene_items(
+    items: list[pystac.Item],
+    dropped_items: list[dict[str, Any]] | None = None,
+) -> list[pystac.Item]:
+    """Keep the highest-baseline item for each MGRS tile and calendar date.
+
+    Same-baseline same-day platform ties prefer S2A, then S2B, then S2C for a
+    stable cross-epoch sensor choice. Every discarded item is logged and can
+    be returned through ``dropped_items`` for the run manifest.
+    """
+    grouped: dict[tuple[str, str], list[pystac.Item]] = {}
     unkeyed: list[pystac.Item] = []
 
-    def rank(item: pystac.Item) -> tuple[float, str]:
+    def baseline_number(item: pystac.Item) -> float:
         baseline = item.properties.get("s2:processing_baseline", 0)
         try:
-            baseline_number = float(baseline)
+            return float(baseline)
         except (TypeError, ValueError):
-            baseline_number = 0.0
-        return baseline_number, item.id
+            return 0.0
+
+    def preference(item: pystac.Item) -> tuple[int, str]:
+        platform = str(item.properties.get("platform", "")).casefold()
+        platform_rank = {"sentinel-2a": 0, "sentinel-2b": 1, "sentinel-2c": 2}.get(platform, 3)
+        return platform_rank, str(item.id)
 
     for item in items:
         props = item.properties
         acquired = props.get("datetime") or props.get("start_datetime")
-        platform = props.get("platform")
         tile = _mgrs_tile(item)
-        if not acquired or not platform or not tile:
+        if not acquired or not tile:
             unkeyed.append(item)
             continue
+        calendar_date = str(acquired).split("T", 1)[0]
+        grouped.setdefault((str(tile), calendar_date), []).append(item)
 
-        key = (str(acquired), str(platform), str(tile))
-        current = selected.get(key)
-        if current is None or rank(item) > rank(current):
-            selected[key] = item
+    selected_items: list[pystac.Item] = []
+    for (tile, calendar_date), candidates in grouped.items():
+        chosen = min(candidates, key=lambda item: (-baseline_number(item), *preference(item)))
+        selected_items.append(chosen)
+        for item in candidates:
+            if item is chosen:
+                continue
+            same_baseline = baseline_number(item) == baseline_number(chosen)
+            reason = (
+                "same-baseline platform/item tie-break"
+                if same_baseline else "lower processing baseline"
+            )
+            record = {
+                "dropped_scene_id": str(item.id),
+                "kept_scene_id": str(chosen.id),
+                "tile": tile,
+                "calendar_date": calendar_date,
+                "dropped_platform": item.properties.get("platform"),
+                "kept_platform": chosen.properties.get("platform"),
+                "dropped_processing_baseline": item.properties.get("s2:processing_baseline"),
+                "kept_processing_baseline": chosen.properties.get("s2:processing_baseline"),
+                "reason": reason,
+                "dropped_item": item.to_dict() if hasattr(item, "to_dict") else None,
+            }
+            if dropped_items is not None:
+                dropped_items.append(record)
+            logger.info(
+                "Dropped duplicate STAC item %s; kept %s for tile=%s date=%s (%s)",
+                item.id, chosen.id, tile, calendar_date, reason,
+            )
 
-    unique_items = list(selected.values()) + unkeyed
+    unique_items = selected_items + unkeyed
     return sorted(
         unique_items,
         key=lambda item: (
@@ -148,6 +187,7 @@ def search_scenes(
     cfg: dict[str, Any],
     epoch_key: str,
     provider: str = "pc",
+    dropped_items: list[dict[str, Any]] | None = None,
 ) -> list[pystac.Item]:
     """
     Search STAC for Sentinel-2 L2A scenes covering the AOI and epoch window.
@@ -164,7 +204,9 @@ def search_scenes(
     Returns
     -------
     list of pystac.Item
-        Items filtered by cloud cover, sorted by date ascending.
+        Deduplicated items, optionally filtered by configured tile-wide cloud
+        cover, sorted by date ascending. The default configuration disables
+        that coarse filter and masks SCL pixels during AOI compositing.
         Empty list if no scenes found (logs a warning).
 
     CRS
@@ -174,35 +216,35 @@ def search_scenes(
     epoch_key = epoch_key.lower()
     epoch = get_epoch(cfg, epoch_key)
     bbox: list[float] = cfg["aoi"]["bbox"]         # [west, south, east, north]
-    max_cloud: int = cfg["sentinel2"]["max_cloud_cover"]
+    max_cloud = cfg["sentinel2"].get("max_cloud_cover")
     collection = S2_COLLECTION_PC if provider == "pc" else S2_COLLECTION_AWS
     stac_url   = PC_STAC_URL if provider == "pc" else AWS_STAC_URL
 
     logger.info(
-        "Searching STAC (%s) | epoch=%s | %s to %s | max_cloud=%d%%",
-        provider, epoch_key, epoch["start"], epoch["end"], max_cloud,
+        "Searching STAC (%s) | epoch=%s | %s to %s | tile_cloud_cutoff=%s",
+        provider, epoch_key, epoch["start"], epoch["end"],
+        f"{max_cloud}%" if max_cloud is not None else "disabled; AOI SCL masking",
     )
 
     client = _open_client(stac_url)
 
     # pystac_client search — UNVERIFIED: query dict key for cloud cover
     # Planetary Computer uses "eo:cloud_cover"; AWS Earth Search also supports it.
+    search_kwargs: dict[str, Any] = {}
+    if max_cloud is not None:
+        search_kwargs["query"] = {"eo:cloud_cover": {"lte": float(max_cloud)}}
     search = client.search(
         collections=[collection],
         bbox=bbox,
         datetime=f"{epoch['start']}/{epoch['end']}",
-        query={"eo:cloud_cover": {"lte": max_cloud}},
         max_items=500,        # safety cap; typical dry-season count is 50–200
+        **search_kwargs,
     )
 
-    items = deduplicate_scene_items(list(search.items()))
+    items = deduplicate_scene_items(list(search.items()), dropped_items=dropped_items)
 
     if not items:
-        logger.warning(
-            "No scenes found for epoch=%s with max_cloud=%d%%. "
-            "Try raising max_cloud_cover in config.yaml.",
-            epoch_key, max_cloud,
-        )
+        logger.warning("No scenes found for epoch=%s", epoch_key)
         return []
 
     logger.info("Found %d scenes for epoch=%s", len(items), epoch_key)
@@ -289,6 +331,7 @@ def load_cached_items(
     cfg: dict[str, Any],
     epoch_key: str,
     provider: str = "pc",
+    dropped_items: list[dict[str, Any]] | None = None,
 ) -> list[pystac.Item] | None:
     """
     Load STAC items from the cache if available.
@@ -307,7 +350,9 @@ def load_cached_items(
 
     logger.info("Loading scenes from cache: %s", items_path)
     raw = json.loads(items_path.read_text(encoding="utf-8"))
-    items = deduplicate_scene_items([pystac.Item.from_dict(d) for d in raw])
+    items = deduplicate_scene_items(
+        [pystac.Item.from_dict(d) for d in raw], dropped_items=dropped_items
+    )
     logger.info("Loaded %d cached items for epoch=%s", len(items), epoch_key)
     return items
 
@@ -317,6 +362,7 @@ def fetch_or_load(
     epoch_key: str,
     provider: str = "pc",
     force_refresh: bool = False,
+    dropped_items: list[dict[str, Any]] | None = None,
 ) -> list[pystac.Item]:
     """
     Cache-first STAC fetch. Loads from cache if available and ``force_refresh``
@@ -335,11 +381,15 @@ def fetch_or_load(
     list of pystac.Item
     """
     if not force_refresh:
-        cached = load_cached_items(cfg, epoch_key, provider=provider)
+        cached = load_cached_items(
+            cfg, epoch_key, provider=provider, dropped_items=dropped_items
+        )
         if cached is not None:
             return [_sign_item(item, provider) for item in cached]
 
-    items = search_scenes(cfg, epoch_key, provider=provider)
+    items = search_scenes(
+        cfg, epoch_key, provider=provider, dropped_items=dropped_items
+    )
     if items:
         cache_scenes(items, cfg, epoch_key, provider=provider)
     return items

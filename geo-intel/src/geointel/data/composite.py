@@ -244,27 +244,11 @@ def normalize_l2a_reflectance(
     stack: xr.DataArray,
     items: list[Any],
 ) -> xr.DataArray:
-    """Apply STAC raster scale/offset, or the provider-specific BOA fallback."""
+    """Apply scale and the BOA offset once, honoring Earth Search's COG flag."""
     if "time" not in stack.dims or "band" not in stack.dims:
         raise ValueError("Stack must have 'time' and 'band' dimensions")
     if stack.sizes["time"] != len(items):
         raise ValueError("Stack time dimension must match the supplied STAC items")
-
-    boa_add_offsets = []
-    offset_start = datetime(2022, 1, 25, tzinfo=UTC)
-    for item in items:
-        baseline = item.properties.get("s2:processing_baseline")
-        acquired = item.properties.get("datetime")
-        if baseline is None or acquired is None:
-            raise ValueError(f"Missing processing baseline or acquisition time for scene {item.id}")
-        acquired_at = datetime.fromisoformat(str(acquired).replace("Z", "+00:00"))
-        offset_already_applied = item.properties.get("earthsearch:boa_offset_applied") is True
-        has_boa_offset = (
-            not offset_already_applied
-            and float(baseline) >= 4.0
-            and acquired_at >= offset_start
-        )
-        boa_add_offsets.append(-1000.0 if has_boa_offset else 0.0)
 
     band_values = list(stack.coords["band"].values)
     normalized_bands = []
@@ -281,15 +265,8 @@ def normalize_l2a_reflectance(
                     asset = assets[AWS_ASSET_KEYS[str(band)]]
                 else:
                     asset = None
-                raster_bands = (
-                    asset.extra_fields.get("raster:bands", []) if asset is not None else []
-                )
-                metadata = raster_bands[0] if raster_bands else {}
-                scale = metadata.get("scale")
-                if scale is not None:
-                    scene = scene * float(scale) + float(metadata.get("offset", 0.0))
-                else:
-                    scene = (scene + boa_add_offsets[time_index]) / 10000.0
+                scale, offset = reflectance_scale_offset(item, str(band))
+                scene = scene * scale + offset
                 scene_arrays.append(
                     scene.expand_dims(time=[stack.coords["time"].values[time_index]])
                 )
@@ -299,8 +276,44 @@ def normalize_l2a_reflectance(
     normalized = xr.concat(normalized_bands, dim="band")
     normalized.attrs.update(stack.attrs)
     normalized.attrs["reflectance_scale"] = 0.0001
-    normalized.attrs["post_2022_boa_add_offset_dn"] = -1000
+    normalized.attrs["boa_offset_application"] = (
+        "asset raster:bands offset once; suppress -0.1 when Earth Search flag is true"
+    )
     return normalized
+
+
+def reflectance_scale_offset(item: Any, band: str) -> tuple[float, float]:
+    """Return the DN scale/offset transform applied to one item's reflectance band.
+
+    Earth Search's ``earthsearch:boa_offset_applied`` describes whether its
+    -0.1 BOA offset is already baked into that COG. Some Earth Search items
+    retain ``raster:bands.offset=-0.1`` even when the flag is true, so the flag
+    takes precedence for that specific BOA correction to prevent double use.
+    Other raster offsets remain honored as declared.
+    """
+    assets = getattr(item, "assets", {})
+    asset = assets.get(band) or assets.get(AWS_ASSET_KEYS.get(band, ""))
+    raster_bands = asset.extra_fields.get("raster:bands", []) if asset is not None else []
+    metadata = raster_bands[0] if raster_bands else {}
+    scale_value = metadata.get("scale")
+    offset_value = metadata.get("offset")
+    scale = float(0.0001 if scale_value is None else scale_value)
+    offset = float(0.0 if offset_value is None else offset_value)
+    boa_applied = item.properties.get("earthsearch:boa_offset_applied")
+    try:
+        baseline = float(item.properties.get("s2:processing_baseline", 0.0))
+    except (TypeError, ValueError):
+        baseline = 0.0
+    # Earth Search can leave raster:bands.offset=-0.1 on COGs whose pixel
+    # values already include it. Honor its explicit per-item state to apply
+    # that correction once, not once in the COG plus once while scaling.
+    if boa_applied is True and np.isclose(offset, -0.1):
+        offset = 0.0
+    elif boa_applied is False and baseline >= 4.0 and np.isclose(offset, 0.0):
+        # A false flag means the COG does not include the PB4+ BOA correction;
+        # apply it even when the raster extension omitted its nonzero offset.
+        offset = -0.1
+    return scale, offset
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +352,19 @@ def compute_median_composite(
     composite.attrs["crs"] = "EPSG:32644"
     logger.info("Composite shape: %s", composite.shape)
     return composite
+
+
+def compute_month_balanced_composite(masked_stack: xr.DataArray) -> xr.DataArray:
+    """Median each calendar month, then give every represented month equal weight.
+
+    Callers must first restrict both epochs to the same set of calendar months.
+    This prevents a month with more acquisitions from contributing more layers
+    to the final epoch composite.
+    """
+    if "time" not in masked_stack.dims or "time" not in masked_stack.coords:
+        raise ValueError("Month-balanced composites require a datetime 'time' coordinate")
+    monthly = masked_stack.groupby("time.month").median(dim="time", skipna=True)
+    return monthly.median(dim="month", skipna=True)
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +626,8 @@ def build_composite_for_epoch(
     manifest: RunManifest | None = None,
     force_refresh: bool = False,
     provider: str = "pc",
+    items: list[Any] | None = None,
+    matched_months: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Full pipeline for one epoch: fetch → mask → composite → save COG.
@@ -644,12 +672,25 @@ def build_composite_for_epoch(
     if manifest:
         manifest.start_timer(f"fetch_{epoch_key}")
 
-    items = fetch_or_load(
-        cfg,
-        epoch_key,
-        provider=provider,
-        force_refresh=force_refresh,
-    )
+    if items is None:
+        items = fetch_or_load(
+            cfg,
+            epoch_key,
+            provider=provider,
+            force_refresh=force_refresh,
+        )
+    if cfg.get("composite", {}).get("month_balanced", False):
+        if not matched_months:
+            raise ValueError("Month-balanced mode requires non-empty matched_months from both epochs")
+        items = [
+            item for item in items
+            if datetime.fromisoformat(
+                str(item.properties.get("datetime") or item.properties.get("start_datetime"))
+                .replace("Z", "+00:00")
+            ).month in matched_months
+        ]
+        if not items:
+            raise ValueError(f"No scenes remain for {epoch_key} in matched months {matched_months}")
 
     if not items:
         raise RuntimeError(
@@ -698,7 +739,15 @@ def build_composite_for_epoch(
     if manifest:
         manifest.start_timer(f"composite_{epoch_key}")
 
-    composite = compute_median_composite(spectral)
+    if cfg.get("composite", {}).get("month_balanced", False):
+        composite = compute_month_balanced_composite(spectral)
+        if manifest:
+            manifest._data.setdefault("compositing", {})[epoch_key] = {
+                "strategy": "monthly median followed by equal-month median",
+                "matched_calendar_months": matched_months,
+            }
+    else:
+        composite = compute_median_composite(spectral)
 
     if manifest:
         manifest.stop_timer(f"composite_{epoch_key}")
